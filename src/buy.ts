@@ -1,5 +1,9 @@
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
+import { resolve, dirname } from "path";
+import { fileURLToPath } from "url";
 import { CotScraper, STATIONS, type PassengerData, type CardData, type Trip } from "./cot-client.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const ALIASES: Record<string, string> = {
   maldonado: "Maldonado terminal",
@@ -31,6 +35,49 @@ function loadPassenger(): PassengerData {
   return JSON.parse(raw);
 }
 
+function loadCardFromEnv(): Omit<CardData, "cvv"> | null {
+  // Try .env file in project root
+  const envPath = resolve(__dirname, "../.env");
+  if (existsSync(envPath)) {
+    const lines = readFileSync(envPath, "utf-8").split("\n");
+    const env: Record<string, string> = {};
+    for (const line of lines) {
+      const match = line.match(/^([A-Z_]+)=(.*)$/);
+      if (match) env[match[1]] = match[2].trim();
+    }
+    if (env.CARD_NUMBER) {
+      const passenger = loadPassenger();
+      return {
+        brand: (env.CARD_BRAND || "visa") as CardData["brand"],
+        number: env.CARD_NUMBER,
+        expiryMonth: env.CARD_EXPIRY?.split("/")[0] || "",
+        expiryYear: env.CARD_EXPIRY?.split("/")[1] || "",
+        holderName: env.CARD_NAME || passenger.nombre,
+        holderLastName: env.CARD_LASTNAME || passenger.apellido,
+        phone: env.CARD_PHONE || passenger.telefono,
+        email: env.CARD_EMAIL || passenger.email,
+      };
+    }
+  }
+
+  // Try env vars directly
+  if (process.env.CARD_NUMBER) {
+    const passenger = loadPassenger();
+    return {
+      brand: (process.env.CARD_BRAND || "visa") as CardData["brand"],
+      number: process.env.CARD_NUMBER,
+      expiryMonth: process.env.CARD_EXPIRY?.split("/")[0] || "",
+      expiryYear: process.env.CARD_EXPIRY?.split("/")[1] || "",
+      holderName: process.env.CARD_NAME || passenger.nombre,
+      holderLastName: process.env.CARD_LASTNAME || passenger.apellido,
+      phone: process.env.CARD_PHONE || passenger.telefono,
+      email: process.env.CARD_EMAIL || passenger.email,
+    };
+  }
+
+  return null;
+}
+
 function parseArgs() {
   const args = process.argv.slice(2);
   let from = "maldonado";
@@ -39,10 +86,7 @@ function parseArgs() {
   let time: string | undefined;
   let type: string | undefined;
   let seat: number | undefined;
-  let cardNumber: string | undefined;
-  let cardExpiry: string | undefined;
-  let cardCvv: string | undefined;
-  let cardBrand: string = "visa";
+  let cvv: string | undefined;
   let dryRun = false;
 
   for (let i = 0; i < args.length; i++) {
@@ -53,33 +97,37 @@ function parseArgs() {
       case "--time": time = args[++i]; break;
       case "--type": type = args[++i]; break;
       case "--seat": seat = parseInt(args[++i]); break;
-      case "--card": cardNumber = args[++i]; break;
-      case "--expiry": cardExpiry = args[++i]; break;
-      case "--cvv": cardCvv = args[++i]; break;
-      case "--brand": cardBrand = args[++i]; break;
+      case "--cvv": cvv = args[++i]; break;
       case "--dry-run": dryRun = true; break;
       case "--help":
         console.log(`
 Usage: npx tsx src/buy.ts [options]
 
+Card data is read from .env file (CARD_NUMBER, CARD_EXPIRY, CARD_BRAND).
+CVV is passed at runtime for security.
+
 Options:
   --from <station>       Origin (default: maldonado)
   --to <station>         Destination (default: tres-cruces)
   --date <YYYY-MM-DD>    Travel date (default: tomorrow)
-  --time <HH:MM>         Preferred departure time (picks closest)
-  --type <type>          Service type filter: directisimo, directo, turno
+  --time <HH:MM>         Departure time
+  --type <type>          Filter: directisimo, directo, turno
   --seat <n>             Preferred seat number
-  --card <number>        Card number
-  --expiry <MM/YY>       Card expiry
-  --cvv <cvv>            Card CVV
-  --brand <brand>        Card brand: visa, master, oca, cabal, anda (default: visa)
-  --dry-run              Stop before payment (show seats only)
+  --cvv <cvv>            Card CVV (required for purchase)
+  --dry-run              Preview only (search + seats, no purchase)
+
+.env file format:
+  CARD_BRAND=visa
+  CARD_NUMBER=4XXXXXXXXXXXXXXX
+  CARD_EXPIRY=12/28
+  CARD_NAME=Diego         (optional, defaults to passenger.json)
+  CARD_LASTNAME=Marvid    (optional, defaults to passenger.json)
 `);
         process.exit(0);
     }
   }
 
-  return { from, to, date, time, type, seat, cardNumber, cardExpiry, cardCvv, cardBrand, dryRun };
+  return { from, to, date, time, type, seat, cvv, dryRun };
 }
 
 async function main() {
@@ -95,7 +143,6 @@ async function main() {
   const scraper = new CotScraper();
 
   try {
-    // Build trip filter
     const tripFilter = (trip: Trip): boolean => {
       if (opts.type) {
         const t = opts.type.toUpperCase();
@@ -108,7 +155,6 @@ async function main() {
     };
 
     if (opts.dryRun) {
-      // Dry run: search + show seats for the matching trip
       console.log("[dry-run] Searching trips...");
       const trips = await scraper.searchTrips({
         originCode: origin.code, originName: origin.name,
@@ -142,26 +188,25 @@ async function main() {
       return;
     }
 
-    // Full purchase
-    if (!opts.cardNumber || !opts.cardExpiry || !opts.cardCvv) {
-      console.error("Error: --card, --expiry, and --cvv are required for purchase.");
-      console.error("Use --dry-run to preview without buying.");
+    // Load card from .env
+    const cardBase = loadCardFromEnv();
+    if (!cardBase) {
+      console.error("Error: No card data found. Create a .env file with:");
+      console.error("  CARD_BRAND=visa");
+      console.error("  CARD_NUMBER=4XXXXXXXXXXXXXXX");
+      console.error("  CARD_EXPIRY=12/28");
       process.exit(1);
     }
 
-    const [expMonth, expYear] = opts.cardExpiry.split("/");
+    if (!opts.cvv) {
+      console.error("Error: --cvv is required for purchase.");
+      console.error("Card data loaded from .env, but CVV must be passed at runtime.");
+      process.exit(1);
+    }
 
-    const card: CardData = {
-      brand: opts.cardBrand as CardData["brand"],
-      number: opts.cardNumber,
-      expiryMonth: expMonth,
-      expiryYear: expYear,
-      cvv: opts.cardCvv,
-      holderName: passenger.nombre,
-      holderLastName: passenger.apellido,
-      phone: passenger.telefono,
-      email: passenger.email,
-    };
+    const card: CardData = { ...cardBase, cvv: opts.cvv };
+
+    console.log(`Card: ${card.brand.toUpperCase()} ****${card.number.slice(-4)}`);
 
     const result = await scraper.buyTicket({
       search: {
