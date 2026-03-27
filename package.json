@@ -1,0 +1,23 @@
+{
+  "name": "bondi-scraper",
+  "version": "1.0.0",
+  "description": "COT bus scraper - Maldonado <-> Tres Cruces availability",
+  "scripts": {
+    "scrape": "npx tsx src/scrape.ts",
+    "scrape:maldonado-mvd": "npx tsx src/scrape.ts --from maldonado --to tres-cruces",
+    "scrape:mvd-maldonado": "npx tsx src/scrape.ts --from tres-cruces --to maldonado",
+    "seats": "npx tsx src/seats.ts",
+    "buy": "npx tsx src/buy.ts",
+    "buy:dry-run": "npx tsx src/buy.ts --dry-run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@types/node": "^25.5.0",
+    "puppeteer": "^24.40.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
